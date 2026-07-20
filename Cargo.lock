@@ -1902,9 +1902,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "data-encoding",
  "futures-util",
  "libthreema",
  "reqwest",
+ "serde",
+ "serde_json",
  "tokio",
  "tokio-tungstenite",
  "tracing",

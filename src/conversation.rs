@@ -7,19 +7,21 @@ use libthreema::{
     model::{
         contact::Contact,
         message::{ContactMessageBody, GroupMessageBody, IncomingMessage, IncomingMessageBody},
-        provider::{ContactProvider, ConversationProvider, ProviderError, in_memory::InMemoryDbContactProvider},
+        provider::{ContactProvider, ConversationProvider, ProviderError},
     },
 };
 
-/// Prints incoming messages to stdout. Delegates contact lookups to the shared in-memory contact
-/// provider so displayed names and existence checks stay consistent with the rest of the app.
+use crate::store::ContactStore;
+
+/// Prints incoming messages to stdout. Delegates contact lookups to the shared contact store so
+/// displayed names and existence checks stay consistent with the rest of the app.
 pub struct PrintingConversationProvider {
-    contacts: InMemoryDbContactProvider,
+    contacts: ContactStore,
     seen: HashSet<(ThreemaId, MessageId)>,
 }
 
 impl PrintingConversationProvider {
-    pub fn new(contacts: InMemoryDbContactProvider) -> Self {
+    pub fn new(contacts: ContactStore) -> Self {
         Self {
             contacts,
             seen: HashSet::new(),
