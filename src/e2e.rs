@@ -5,6 +5,7 @@
 //! client operates as a linked (multi-device) device.
 use anyhow::{anyhow, bail};
 use libthreema::{
+    common::keys::DeviceGroupKey,
     csp_e2e::{
         CspE2eProtocol, CspE2eProtocolContextInit, D2mRole, ReflectId,
         contacts::{
@@ -41,7 +42,7 @@ pub struct CspE2eProtocolRunner {
     d2m_outgoing: mpsc::Sender<D2mOutgoingPayload>,
     d2m_incoming: mpsc::Receiver<D2mIncomingPayload>,
     /// Needed to decrypt `Reflected` envelopes -- see `crate::d2d`.
-    device_group_key: [u8; 32],
+    device_group_key: DeviceGroupKey,
     contacts: ContactStore,
 }
 
@@ -51,7 +52,7 @@ impl CspE2eProtocolRunner {
         context: CspE2eProtocolContextInit,
         d2m_outgoing: mpsc::Sender<D2mOutgoingPayload>,
         d2m_incoming: mpsc::Receiver<D2mIncomingPayload>,
-        device_group_key: [u8; 32],
+        device_group_key: DeviceGroupKey,
         contacts: ContactStore,
     ) -> Self {
         Self {

@@ -8,14 +8,8 @@ publish = false
 libthreema = { path = "../threema-desktop/packages/libthreema-wasm/libs/libthreema/lib", features = [
     "cli",
 ] }
-aead = "0.5"
 anyhow = "1"
-blake2 = { version = "0.10", default-features = false, features = ["std"] }
 clap = { version = "4", features = ["derive"] }
-crypto_secretbox = { version = "0.1", default-features = false, features = [
-    "alloc",
-    "salsa20",
-] }
 data-encoding = "2"
 futures-util = "0.3"
 prost = "0.14"
@@ -39,6 +33,16 @@ tokio-tungstenite = { version = "0.28", default-features = false, features = [
     "native-tls",
 ] }
 tracing = "0.1"
+
+[dev-dependencies]
+# Only used to build a realistic encrypted fixture in d2d.rs's test, independently of the real
+# decrypt path (`DeviceGroupKey::decrypt_reflected_envelope`) it's cross-checked against.
+aead = "0.5"
+blake2 = { version = "0.10", default-features = false, features = ["std"] }
+crypto_secretbox = { version = "0.1", default-features = false, features = [
+    "alloc",
+    "salsa20",
+] }
 
 # libthreema is written against a locally patched `blake2` (adds a non-keyed hash with
 # parameters); this mirrors the `[patch.crates-io]` entry from its own workspace root, which

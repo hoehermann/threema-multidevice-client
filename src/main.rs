@@ -8,10 +8,9 @@ use std::{path::PathBuf, sync::Arc};
 
 use anyhow::Context as _;
 use clap::Parser;
-use data_encoding::HEXLOWER_PERMISSIVE;
 use libthreema::{
     cli::{FullIdentityConfig, FullIdentityConfigOptions},
-    common::ClientInfo,
+    common::{ClientInfo, keys::DeviceGroupKey},
     csp_e2e::CspE2eProtocolContextInit,
     https::cli::https_client_builder,
     model::provider::{ProviderError, SettingsProvider, in_memory::DefaultShortcutProvider},
@@ -52,25 +51,6 @@ impl SettingsProvider for AllowAllSettingsProvider {
     }
 }
 
-/// Re-extracts a `--flag=value`/`--flag value` argument's raw string from argv.
-///
-/// Only used for `--device-group-key`: libthreema's `RawDeviceGroupKey` has no public byte
-/// accessor (only `from_hex`), but decrypting D2D `Reflected` envelopes (`crate::d2d`) needs the
-/// raw 32 bytes directly, so this re-reads argv rather than going through clap's parsed type.
-fn find_arg_value(flag: &str) -> Option<String> {
-    let prefix = format!("{flag}=");
-    let mut args = std::env::args();
-    while let Some(arg) = args.next() {
-        if let Some(value) = arg.strip_prefix(&prefix) {
-            return Some(value.to_owned());
-        }
-        if arg == flag {
-            return args.next();
-        }
-    }
-    None
-}
-
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     init_stderr_logging(Level::INFO);
@@ -79,22 +59,22 @@ async fn main() -> anyhow::Result<()> {
     let arguments = Args::parse();
     let config = FullIdentityConfig::from_options(&http_client, arguments.config).await?;
 
+    // Validated up front (rather than only via `d2m_context()` below) so the raw device group
+    // key is available for decrypting D2D `Reflected` envelopes too.
+    let d2x_config = config.d2x_config.as_ref().context(
+        "Multi-device must be configured: pass --d2x-device-id, --csp-device-id, \
+         --device-group-key and --expected-device-slot-state",
+    )?;
+
     let d2m_context = config.d2m_context().context(
         "Multi-device must be configured: pass --d2x-device-id, --csp-device-id, \
          --device-group-key and --expected-device-slot-state",
     )?;
 
-    // See `find_arg_value`'s doc comment for why this isn't just read off `d2x_config` directly.
-    let device_group_key: [u8; 32] = {
-        let hex = find_arg_value("--device-group-key")
-            .context("--device-group-key missing (should have been rejected by clap already)")?;
-        let bytes = HEXLOWER_PERMISSIVE
-            .decode(hex.as_bytes())
-            .context("--device-group-key is not valid hex (should have been rejected by clap already)")?;
-        bytes
-            .try_into()
-            .map_err(|bytes: Vec<u8>| anyhow::anyhow!("--device-group-key must be 32 bytes, got {}", bytes.len()))?
-    };
+    // Held for the E2E driver's whole lifetime to decrypt D2D `Reflected` envelopes (see
+    // `crate::d2d`) -- a separate instance from the one inside `d2m_context`, since
+    // `DeviceGroupKey` isn't `Clone`.
+    let device_group_key = DeviceGroupKey::from(&d2x_config.device_group_key);
 
     std::fs::create_dir_all(&arguments.state_dir)
         .with_context(|| format!("Failed to create {}", arguments.state_dir.display()))?;

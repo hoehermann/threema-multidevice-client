@@ -2,20 +2,17 @@
 //! whenever it -- not this CLI -- holds the D2M "leader" role) sends about messages it has sent or
 //! received, so every linked device's history stays consistent.
 //!
-//! libthreema has no decoder for this (only the encode side, used when *this* device is leader and
-//! needs to reflect to others -- see `csp_e2e::reflect`), so this reimplements just enough of it:
-//! decrypt with the Device Group Reflect Key (DGRK), parse as a `d2d.Envelope`, and print `body` for
-//! the two content variants that carry a plain-text message. Everything else (contact/group/settings
-//! sync, etc.) is out of scope, same as the CSP-E2E side only handling text messages.
-use aead::{Aead as _, KeyInit as _};
-use anyhow::{Context as _, bail};
-use blake2::{
-    Blake2bMac,
-    digest::{FixedOutput as _, consts::U32},
-};
-use crypto_secretbox::XSalsa20Poly1305;
+//! libthreema's `CspE2eProtocol` has no decoder for this (only the encode side, used when *this*
+//! device is leader and needs to reflect to others -- see `csp_e2e::reflect`). Decryption itself
+//! goes through `DeviceGroupKey::decrypt_reflected_envelope`, added directly to the vendored
+//! libthreema (it already has the correct, tested DGRK derivation crate-private; exposing one
+//! narrow method beats reimplementing that derivation independently). What's left to do here is
+//! just parsing the decrypted bytes as a `d2d.Envelope` and printing `body` for the two content
+//! variants that carry a plain-text message -- everything else (contact/group/settings sync,
+//! etc.) is out of scope, same boundary as the CSP-E2E side only handling text messages.
+use anyhow::Context as _;
 use libthreema::{
-    common::{GroupIdentity, ThreemaId},
+    common::{GroupIdentity, ThreemaId, keys::DeviceGroupKey},
     protobuf::{
         self,
         common::CspE2eMessageType,
@@ -25,29 +22,6 @@ use libthreema::{
 use prost::Message as _;
 
 use crate::store::ContactStore;
-
-type Blake2bMac256 = Blake2bMac<U32>;
-
-/// Derive the Device Group Reflect Key (DGRK) from the raw 32-byte Device Group Key.
-///
-/// Mirrors libthreema's own (crate-private) `DeviceGroupKey::derive_key`/`reflect_key`: BLAKE2b
-/// keyed by the device group key, salt `b"r"`, personalization `b"3ma-mdev"`, no message input.
-fn derive_reflect_key(device_group_key: &[u8; 32]) -> [u8; 32] {
-    let mac = Blake2bMac256::new_with_salt_and_personal(Some(device_group_key), b"r", b"3ma-mdev")
-        .expect("Blake2bMac256 with a 32-byte key, 1-byte salt and 8-byte personalization should be valid");
-    mac.finalize_fixed().into()
-}
-
-fn decrypt(key: &[u8; 32], nonce_and_ciphertext: &[u8]) -> anyhow::Result<Vec<u8>> {
-    const NONCE_LENGTH: usize = 24;
-    if nonce_and_ciphertext.len() < NONCE_LENGTH {
-        bail!("Reflected envelope shorter than a nonce ({} bytes)", nonce_and_ciphertext.len());
-    }
-    let (nonce, ciphertext) = nonce_and_ciphertext.split_at(NONCE_LENGTH);
-    XSalsa20Poly1305::new(key.into())
-        .decrypt(nonce.into(), ciphertext)
-        .map_err(|_| anyhow::anyhow!("Decrypting reflected D2D envelope failed"))
-}
 
 fn conversation_label(contacts: &ContactStore, conversation: Option<protobuf::d2d::ConversationId>) -> String {
     use protobuf::d2d::conversation_id::Id;
@@ -76,12 +50,13 @@ fn is_text_type(message_type: i32) -> bool {
 /// message. Returns `Ok(())` for anything else (contact/group sync, non-text messages, ...) --
 /// those are silently out of scope, not errors.
 pub fn handle_reflected_envelope(
-    device_group_key: &[u8; 32],
+    device_group_key: &DeviceGroupKey,
     envelope: &[u8],
     contacts: &ContactStore,
 ) -> anyhow::Result<()> {
-    let reflect_key = derive_reflect_key(device_group_key);
-    let plaintext = decrypt(&reflect_key, envelope).context("Failed to decrypt reflected envelope")?;
+    let plaintext = device_group_key
+        .decrypt_reflected_envelope(envelope)
+        .map_err(|_| anyhow::anyhow!("Decrypting reflected D2D envelope failed"))?;
     let envelope = Envelope::decode(plaintext.as_slice()).context("Failed to decode d2d.Envelope")?;
 
     match envelope.content {
@@ -109,13 +84,27 @@ pub fn handle_reflected_envelope(
 
 #[cfg(test)]
 mod tests {
-    use aead::rand_core::RngCore as _;
+    use aead::{Aead as _, KeyInit as _, rand_core::RngCore as _};
+    use blake2::{
+        Blake2bMac,
+        digest::{FixedOutput as _, consts::U32},
+    };
+    use crypto_secretbox::XSalsa20Poly1305;
     use libthreema::protobuf::{
         common::CspE2eMessageType,
         d2d::{ConversationId, OutgoingMessage, conversation_id::Id},
     };
 
     use super::*;
+
+    /// Independent reimplementation of the DGRK derivation, used only to build a realistic
+    /// encrypted test fixture -- cross-checked against the real
+    /// `DeviceGroupKey::decrypt_reflected_envelope` below, not just self-consistency.
+    fn derive_reflect_key(device_group_key: &[u8; 32]) -> [u8; 32] {
+        let mac = Blake2bMac::<U32>::new_with_salt_and_personal(Some(device_group_key), b"r", b"3ma-mdev")
+            .expect("Blake2bMac256 with a 32-byte key, 1-byte salt and 8-byte personalization should be valid");
+        mac.finalize_fixed().into()
+    }
 
     fn encrypt(key: &[u8; 32], plaintext: &[u8]) -> Vec<u8> {
         let mut nonce = [0_u8; 24];
@@ -129,8 +118,8 @@ mod tests {
     #[test]
     #[allow(deprecated, reason = "padding content is irrelevant for this round-trip test")]
     fn reflected_text_message_round_trips() {
-        let device_group_key = [7_u8; 32];
-        let reflect_key = derive_reflect_key(&device_group_key);
+        let device_group_key_bytes = [7_u8; 32];
+        let reflect_key = derive_reflect_key(&device_group_key_bytes);
 
         let envelope = Envelope {
             padding: vec![],
@@ -151,10 +140,12 @@ mod tests {
         let encrypted = encrypt(&reflect_key, &envelope.encode_to_vec());
 
         // Wrong key must not decrypt.
-        let wrong_key = derive_reflect_key(&[9_u8; 32]);
-        assert!(decrypt(&wrong_key, &encrypted).is_err());
+        let wrong_key = DeviceGroupKey::from([9_u8; 32]);
+        assert!(wrong_key.decrypt_reflected_envelope(&encrypted).is_err());
 
-        // Right key must decrypt, and the whole pipeline should run without error.
+        // Right key, decrypted via the real (libthreema) implementation, must decrypt -- and the
+        // whole pipeline should run without error.
+        let device_group_key = DeviceGroupKey::from(device_group_key_bytes);
         let contacts_path = std::env::temp_dir().join(format!(
             "threema-cli-test-d2d-contacts-{}-{}.json",
             std::process::id(),
