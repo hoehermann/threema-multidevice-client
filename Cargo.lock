@@ -1900,11 +1900,15 @@ dependencies = [
 name = "threema-cli"
 version = "0.1.0"
 dependencies = [
+ "aead",
  "anyhow",
+ "blake2",
  "clap",
+ "crypto_secretbox",
  "data-encoding",
  "futures-util",
  "libthreema",
+ "prost",
  "reqwest",
  "serde",
  "serde_json",

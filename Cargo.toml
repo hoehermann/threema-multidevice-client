@@ -8,10 +8,17 @@ publish = false
 libthreema = { path = "../threema-desktop/packages/libthreema-wasm/libs/libthreema/lib", features = [
     "cli",
 ] }
+aead = "0.5"
 anyhow = "1"
+blake2 = { version = "0.10", default-features = false, features = ["std"] }
 clap = { version = "4", features = ["derive"] }
+crypto_secretbox = { version = "0.1", default-features = false, features = [
+    "alloc",
+    "salsa20",
+] }
 data-encoding = "2"
 futures-util = "0.3"
+prost = "0.14"
 reqwest = { version = "0.13", default-features = false, features = [
     "http2",
     "native-tls",

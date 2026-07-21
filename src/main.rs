@@ -8,6 +8,7 @@ use std::{path::PathBuf, sync::Arc};
 
 use anyhow::Context as _;
 use clap::Parser;
+use data_encoding::HEXLOWER_PERMISSIVE;
 use libthreema::{
     cli::{FullIdentityConfig, FullIdentityConfigOptions},
     common::ClientInfo,
@@ -21,6 +22,7 @@ use tracing::Level;
 
 mod conversation;
 mod csp;
+mod d2d;
 mod d2m;
 mod e2e;
 mod store;
@@ -50,6 +52,25 @@ impl SettingsProvider for AllowAllSettingsProvider {
     }
 }
 
+/// Re-extracts a `--flag=value`/`--flag value` argument's raw string from argv.
+///
+/// Only used for `--device-group-key`: libthreema's `RawDeviceGroupKey` has no public byte
+/// accessor (only `from_hex`), but decrypting D2D `Reflected` envelopes (`crate::d2d`) needs the
+/// raw 32 bytes directly, so this re-reads argv rather than going through clap's parsed type.
+fn find_arg_value(flag: &str) -> Option<String> {
+    let prefix = format!("{flag}=");
+    let mut args = std::env::args();
+    while let Some(arg) = args.next() {
+        if let Some(value) = arg.strip_prefix(&prefix) {
+            return Some(value.to_owned());
+        }
+        if arg == flag {
+            return args.next();
+        }
+    }
+    None
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     init_stderr_logging(Level::INFO);
@@ -62,6 +83,18 @@ async fn main() -> anyhow::Result<()> {
         "Multi-device must be configured: pass --d2x-device-id, --csp-device-id, \
          --device-group-key and --expected-device-slot-state",
     )?;
+
+    // See `find_arg_value`'s doc comment for why this isn't just read off `d2x_config` directly.
+    let device_group_key: [u8; 32] = {
+        let hex = find_arg_value("--device-group-key")
+            .context("--device-group-key missing (should have been rejected by clap already)")?;
+        let bytes = HEXLOWER_PERMISSIVE
+            .decode(hex.as_bytes())
+            .context("--device-group-key is not valid hex (should have been rejected by clap already)")?;
+        bytes
+            .try_into()
+            .map_err(|bytes: Vec<u8>| anyhow::anyhow!("--device-group-key must be 32 bytes, got {}", bytes.len()))?
+    };
 
     std::fs::create_dir_all(&arguments.state_dir)
         .with_context(|| format!("Failed to create {}", arguments.state_dir.display()))?;
@@ -78,7 +111,7 @@ async fn main() -> anyhow::Result<()> {
         shortcut: Box::new(DefaultShortcutProvider),
         settings: Box::new(RefCell::new(AllowAllSettingsProvider)),
         contacts: Box::new(RefCell::new(contacts.clone())),
-        conversations: Box::new(RefCell::new(PrintingConversationProvider::new(contacts))),
+        conversations: Box::new(RefCell::new(PrintingConversationProvider::new(contacts.clone()))),
     };
 
     // Channels between the CSP connection and the E2E driver.
@@ -107,8 +140,14 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Connecting to mediator server");
     let d2m_runner = D2mProtocolRunner::new(d2m_context).await?;
 
-    let e2e_runner =
-        CspE2eProtocolRunner::new(http_client, csp_e2e_context, d2m_outgoing_tx, d2m_incoming_rx);
+    let e2e_runner = CspE2eProtocolRunner::new(
+        http_client,
+        csp_e2e_context,
+        d2m_outgoing_tx,
+        d2m_incoming_rx,
+        device_group_key,
+        contacts,
+    );
 
     // None of these runners are `Send` (the in-memory providers use `Rc`), so they must run
     // concurrently within a single task via `select!` rather than via `tokio::spawn`.

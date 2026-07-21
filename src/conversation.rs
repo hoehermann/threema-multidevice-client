@@ -20,6 +20,28 @@ pub struct PrintingConversationProvider {
     seen: HashSet<(ThreemaId, MessageId)>,
 }
 
+/// Resolve a display name for `identity` via the contact store: nickname, else first/last name,
+/// else just the bare identity -- always suffixed with `(IDENTITY)` when a name was found.
+pub fn display_name(contacts: &ContactStore, identity: ThreemaId) -> String {
+    let contact: Option<Contact> = contacts.get(identity).ok().flatten();
+    let Some(contact) = contact else {
+        return identity.to_string();
+    };
+    if let Some(nickname) = contact.nickname.filter(|name| !name.is_empty()) {
+        return format!("{nickname} ({identity})");
+    }
+    let full_name = [contact.first_name, contact.last_name]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if full_name.is_empty() {
+        identity.to_string()
+    } else {
+        format!("{full_name} ({identity})")
+    }
+}
+
 impl PrintingConversationProvider {
     pub fn new(contacts: ContactStore) -> Self {
         Self {
@@ -28,28 +50,8 @@ impl PrintingConversationProvider {
         }
     }
 
-    fn display_name(&self, identity: ThreemaId) -> String {
-        let contact: Option<Contact> = self.contacts.get(identity).ok().flatten();
-        let Some(contact) = contact else {
-            return identity.to_string();
-        };
-        if let Some(nickname) = contact.nickname.filter(|name| !name.is_empty()) {
-            return format!("{nickname} ({identity})");
-        }
-        let full_name = [contact.first_name, contact.last_name]
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>()
-            .join(" ");
-        if full_name.is_empty() {
-            identity.to_string()
-        } else {
-            format!("{full_name} ({identity})")
-        }
-    }
-
     fn print_message(&self, sender_identity: ThreemaId, created_at: u64, body: &str, context: Option<String>) {
-        let author = self.display_name(sender_identity);
+        let author = display_name(&self.contacts, sender_identity);
         match context {
             Some(context) => println!("[{created_at}] {author} ({context}): {body}"),
             None => println!("[{created_at}] {author}: {body}"),

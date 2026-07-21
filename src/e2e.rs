@@ -28,15 +28,21 @@ use libthreema::{
     protobuf,
 };
 use tokio::sync::mpsc;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
-use crate::csp::{IncomingPayloadForCspE2e, OutgoingPayloadForCspE2e, PayloadQueuesForCspE2e};
+use crate::{
+    csp::{IncomingPayloadForCspE2e, OutgoingPayloadForCspE2e, PayloadQueuesForCspE2e},
+    store::ContactStore,
+};
 
 pub struct CspE2eProtocolRunner {
     protocol: CspE2eProtocol,
     http_client: reqwest::Client,
     d2m_outgoing: mpsc::Sender<D2mOutgoingPayload>,
     d2m_incoming: mpsc::Receiver<D2mIncomingPayload>,
+    /// Needed to decrypt `Reflected` envelopes -- see `crate::d2d`.
+    device_group_key: [u8; 32],
+    contacts: ContactStore,
 }
 
 impl CspE2eProtocolRunner {
@@ -45,12 +51,16 @@ impl CspE2eProtocolRunner {
         context: CspE2eProtocolContextInit,
         d2m_outgoing: mpsc::Sender<D2mOutgoingPayload>,
         d2m_incoming: mpsc::Receiver<D2mIncomingPayload>,
+        device_group_key: [u8; 32],
+        contacts: ContactStore,
     ) -> Self {
         Self {
             protocol: CspE2eProtocol::new(context),
             http_client,
             d2m_outgoing,
             d2m_incoming,
+            device_group_key,
+            contacts,
         }
     }
 
@@ -163,10 +173,16 @@ impl CspE2eProtocolRunner {
                 self.protocol.update_d2m_state(D2mRole::Leader)?;
             },
             D2mIncomingPayload::Reflected(reflected) => {
-                // Processing D2D-reflected sync data (contact/group/settings sync from sibling
-                // devices) isn't implemented -- libthreema doesn't expose a decoder for it yet.
-                // Acknowledge it anyway so the mediator's reflection queue keeps moving.
-                debug!(reflect_id = reflected.reflect_id, "Ignoring reflected D2D envelope");
+                // Messages sent/received while a sibling device (e.g. the phone) held the D2M
+                // leader role arrive here rather than via CSP -- decode and print if it's a
+                // plain-text message (see `crate::d2d` for why libthreema itself doesn't decode
+                // this). A decode failure shouldn't be fatal -- still ack it below regardless, so
+                // the mediator's reflection queue keeps moving.
+                if let Err(error) =
+                    crate::d2d::handle_reflected_envelope(&self.device_group_key, &reflected.envelope, &self.contacts)
+                {
+                    error!(reflect_id = reflected.reflect_id, ?error, "Failed to handle reflected D2D envelope");
+                }
                 self.d2m_outgoing
                     .send(D2mOutgoingPayload::ReflectedAck(ReflectedAck {
                         reflect_id: reflected.reflect_id,
