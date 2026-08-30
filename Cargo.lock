@@ -1897,7 +1897,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "threema-cli"
+name = "threema-multidevice-client"
 version = "0.1.0"
 dependencies = [
  "aead",

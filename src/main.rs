@@ -7,7 +7,7 @@ use libthreema::{cli::FullIdentityConfigOptions, utils::logging::init_stderr_log
 use tokio::sync::mpsc;
 use tracing::Level;
 
-use threema_cli::{Command, Conversation, Event, TextMessage};
+use threema_multidevice_client::{Command, Conversation, Event, TextMessage};
 
 #[derive(Parser)]
 #[command(about = "Prints incoming Threema plain-text messages to stdout")]
@@ -69,7 +69,7 @@ async fn main() -> anyhow::Result<()> {
     let arguments = Args::parse();
     init_stderr_logging(arguments.log_level);
 
-    let config = threema_cli::Config {
+    let config = threema_multidevice_client::Config {
         identity: arguments.config,
         state_dir: arguments.state_dir,
     };
@@ -94,7 +94,7 @@ async fn main() -> anyhow::Result<()> {
     });
 
     tokio::select! {
-        result = threema_cli::run(config, event_tx, command_rx) => result?,
+        result = threema_multidevice_client::run(config, event_tx, command_rx) => result?,
         () = printer => {},
     }
 

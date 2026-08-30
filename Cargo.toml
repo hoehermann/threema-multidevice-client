@@ -1,8 +1,12 @@
 [package]
-name = "threema-cli"
+name = "threema-multidevice-client"
 version = "0.1.0"
 edition = "2024"
 publish = false
+
+[[bin]]
+name = "threema-cli"
+path = "src/main.rs"
 
 [dependencies]
 libthreema = { path = "../threema-desktop/packages/libthreema-wasm/libs/libthreema/lib", features = [
