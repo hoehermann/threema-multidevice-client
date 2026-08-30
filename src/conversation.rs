@@ -53,8 +53,8 @@ impl PrintingConversationProvider {
     fn print_message(&self, sender_identity: ThreemaId, created_at: u64, body: &str, context: Option<String>) {
         let author = display_name(&self.contacts, sender_identity);
         match context {
-            Some(context) => println!("[{created_at}] {author} ({context}): {body}"),
-            None => println!("[{created_at}] {author}: {body}"),
+            Some(context) => println!("[{created_at}] {author} [{sender_identity}] ({context}): {body}"),
+            None => println!("[{created_at}] {author} [{sender_identity}]: {body}"),
         }
     }
 }

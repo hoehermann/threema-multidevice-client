@@ -23,19 +23,28 @@ use prost::Message as _;
 
 use crate::store::ContactStore;
 
-fn conversation_label(contacts: &ContactStore, conversation: Option<protobuf::d2d::ConversationId>) -> String {
+/// Returns the conversation's display label, plus its raw contact identity when it's a
+/// one-to-one conversation (so callers can disambiguate same-named contacts) -- groups and
+/// distribution lists have no comparable per-conversation identity, so `None` there.
+fn conversation_label(
+    contacts: &ContactStore,
+    conversation: Option<protobuf::d2d::ConversationId>,
+) -> (String, Option<String>) {
     use protobuf::d2d::conversation_id::Id;
     match conversation.and_then(|conversation| conversation.id) {
-        Some(Id::Contact(identity)) => match identity.parse::<ThreemaId>() {
-            Ok(identity) => crate::conversation::display_name(contacts, identity),
-            Err(_) => identity,
+        Some(Id::Contact(identity)) => {
+            let label = match identity.parse::<ThreemaId>() {
+                Ok(identity) => crate::conversation::display_name(contacts, identity),
+                Err(_) => identity.clone(),
+            };
+            (label, Some(identity))
         },
         Some(Id::Group(group)) => match GroupIdentity::try_from(&group) {
-            Ok(group) => format!("group {}/{}", group.creator_identity, group.group_id),
-            Err(_) => "group <invalid>".to_owned(),
+            Ok(group) => (format!("group {}/{}", group.creator_identity, group.group_id), None),
+            Err(_) => ("group <invalid>".to_owned(), None),
         },
-        Some(Id::DistributionList(id)) => format!("distribution list {id}"),
-        None => "<unknown conversation>".to_owned(),
+        Some(Id::DistributionList(id)) => (format!("distribution list {id}"), None),
+        None => ("<unknown conversation>".to_owned(), None),
     }
 }
 
@@ -62,16 +71,19 @@ pub fn handle_reflected_envelope(
     match envelope.content {
         Some(Content::OutgoingMessage(message)) if is_text_type(message.r#type) => {
             let text = String::from_utf8(message.body).context("Outgoing message body is not valid UTF-8")?;
-            let to = conversation_label(contacts, message.conversation);
-            println!("[{}] me (to {to}): {text}", message.created_at);
+            let (to, identifier) = conversation_label(contacts, message.conversation);
+            match identifier {
+                Some(identifier) => println!("[{}] me (to {to} [{identifier}]): {text}", message.created_at),
+                None => println!("[{}] me (to {to}): {text}", message.created_at),
+            }
         },
         Some(Content::IncomingMessage(message)) if is_text_type(message.r#type) => {
             let text = String::from_utf8(message.body).context("Incoming message body is not valid UTF-8")?;
             let author = match message.sender_identity.parse::<ThreemaId>() {
                 Ok(identity) => crate::conversation::display_name(contacts, identity),
-                Err(_) => message.sender_identity,
+                Err(_) => message.sender_identity.clone(),
             };
-            println!("[{}] {author}: {text}", message.created_at);
+            println!("[{}] {author} [{}]: {text}", message.created_at, message.sender_identity);
         },
         _ => {
             // Non-text message, or a sync content type we don't handle (contact/group/settings
