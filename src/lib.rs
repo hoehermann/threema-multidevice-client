@@ -31,6 +31,9 @@ pub use event::{Conversation, Event, TextMessage};
 // Handy for embedders (the CLI, an FFI shim) that want log output without owning a tracing
 // subscriber of their own.
 pub use libthreema::utils::logging::init_stderr_logging;
+// Re-exported so embedders can construct [`Config::identity`] (and parse its value types from
+// strings) without managing their own libthreema path dependency.
+pub use libthreema;
 
 use conversation::EventConversationProvider;
 use csp::{CspProtocolRunner, PayloadQueuesForCspE2e};
