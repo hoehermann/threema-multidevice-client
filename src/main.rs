@@ -1,11 +1,13 @@
-//! Command-line front-end for the client library: parses arguments and runs the client until it
-//! terminates or Ctrl-C is received. Message output currently comes from the library itself
-//! (stdout); see `threema_cli::run`.
+//! Command-line front-end for the client library: parses arguments, runs the client until it
+//! terminates or Ctrl-C is received, and prints every reported message to stdout.
 use std::path::PathBuf;
 
 use clap::Parser;
 use libthreema::{cli::FullIdentityConfigOptions, utils::logging::init_stderr_logging};
+use tokio::sync::mpsc;
 use tracing::Level;
+
+use threema_cli::{Conversation, Event, TextMessage};
 
 #[derive(Parser)]
 #[command(about = "Prints incoming Threema plain-text messages to stdout")]
@@ -22,6 +24,46 @@ struct Args {
     log_level: Level,
 }
 
+/// `Name (IDENTITY)` when a name is known, else just the bare identity.
+fn label(identity: &str, name: Option<&str>) -> String {
+    match name {
+        Some(name) => format!("{name} ({identity})"),
+        None => identity.to_owned(),
+    }
+}
+
+fn print_text_message(message: &TextMessage) {
+    let TextMessage {
+        timestamp_ms, text, ..
+    } = message;
+    if message.outgoing {
+        let to = match &message.conversation {
+            Conversation::Contact { identity, name } => {
+                format!("{} [{identity}]", label(identity, name.as_deref()))
+            },
+            Conversation::Group {
+                creator_identity,
+                group_id,
+            } => format!("group {creator_identity}/{group_id}"),
+            Conversation::DistributionList { id } => format!("distribution list {id}"),
+            Conversation::Unknown => "<unknown conversation>".to_owned(),
+        };
+        println!("[{timestamp_ms}] me (to {to}): {text}");
+    } else {
+        let sender_identity = message.sender_identity.as_deref().unwrap_or("<unknown>");
+        let author = label(sender_identity, message.sender_name.as_deref());
+        match &message.conversation {
+            Conversation::Group {
+                creator_identity,
+                group_id,
+            } => println!(
+                "[{timestamp_ms}] {author} [{sender_identity}] (group {creator_identity}/{group_id}): {text}"
+            ),
+            _ => println!("[{timestamp_ms}] {author} [{sender_identity}]: {text}"),
+        }
+    }
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     let arguments = Args::parse();
@@ -32,8 +74,18 @@ async fn main() -> anyhow::Result<()> {
         state_dir: arguments.state_dir,
     };
 
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let printer = async move {
+        while let Some(event) = event_rx.recv().await {
+            match event {
+                Event::TextMessage(message) => print_text_message(&message),
+            }
+        }
+    };
+
     tokio::select! {
-        result = threema_cli::run(config) => result?,
+        result = threema_cli::run(config, event_tx) => result?,
+        () = printer => {},
         _ = tokio::signal::ctrl_c() => {
             tracing::info!("Received Ctrl-C, shutting down");
         },

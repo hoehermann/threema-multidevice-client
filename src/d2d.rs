@@ -7,9 +7,9 @@
 //! goes through `DeviceGroupKey::decrypt_reflected_envelope`, added directly to the vendored
 //! libthreema (it already has the correct, tested DGRK derivation crate-private; exposing one
 //! narrow method beats reimplementing that derivation independently). What's left to do here is
-//! just parsing the decrypted bytes as a `d2d.Envelope` and printing `body` for the two content
-//! variants that carry a plain-text message -- everything else (contact/group/settings sync,
-//! etc.) is out of scope, same boundary as the CSP-E2E side only handling text messages.
+//! just parsing the decrypted bytes as a `d2d.Envelope` and emitting an [`Event`] for the two
+//! content variants that carry a plain-text message -- everything else (contact/group/settings
+//! sync, etc.) is out of scope, same boundary as the CSP-E2E side only handling text messages.
 use anyhow::Context as _;
 use libthreema::{
     common::{GroupIdentity, ThreemaId, keys::DeviceGroupKey},
@@ -20,31 +20,33 @@ use libthreema::{
     },
 };
 use prost::Message as _;
+use tokio::sync::mpsc;
 
-use crate::store::ContactStore;
+use crate::{
+    conversation::contact_name,
+    event::{Conversation, Event, TextMessage},
+    store::ContactStore,
+};
 
-/// Returns the conversation's display label, plus its raw contact identity when it's a
-/// one-to-one conversation (so callers can disambiguate same-named contacts) -- groups and
-/// distribution lists have no comparable per-conversation identity, so `None` there.
-fn conversation_label(
-    contacts: &ContactStore,
-    conversation: Option<protobuf::d2d::ConversationId>,
-) -> (String, Option<String>) {
+fn conversation(contacts: &ContactStore, conversation: Option<protobuf::d2d::ConversationId>) -> Conversation {
     use protobuf::d2d::conversation_id::Id;
     match conversation.and_then(|conversation| conversation.id) {
         Some(Id::Contact(identity)) => {
-            let label = match identity.parse::<ThreemaId>() {
-                Ok(identity) => crate::conversation::display_name(contacts, identity),
-                Err(_) => identity.clone(),
-            };
-            (label, Some(identity))
+            let name = identity
+                .parse::<ThreemaId>()
+                .ok()
+                .and_then(|identity| contact_name(contacts, identity));
+            Conversation::Contact { identity, name }
         },
         Some(Id::Group(group)) => match GroupIdentity::try_from(&group) {
-            Ok(group) => (format!("group {}/{}", group.creator_identity, group.group_id), None),
-            Err(_) => ("group <invalid>".to_owned(), None),
+            Ok(group) => Conversation::Group {
+                creator_identity: group.creator_identity.to_string(),
+                group_id: group.group_id,
+            },
+            Err(_) => Conversation::Unknown,
         },
-        Some(Id::DistributionList(id)) => (format!("distribution list {id}"), None),
-        None => ("<unknown conversation>".to_owned(), None),
+        Some(Id::DistributionList(id)) => Conversation::DistributionList { id },
+        None => Conversation::Unknown,
     }
 }
 
@@ -55,13 +57,21 @@ fn is_text_type(message_type: i32) -> bool {
     )
 }
 
-/// Decrypts and decodes a `Reflected.envelope`, printing it if (and only if) it's a plain-text
-/// message. Returns `Ok(())` for anything else (contact/group sync, non-text messages, ...) --
-/// those are silently out of scope, not errors.
+fn emit(events: &mpsc::UnboundedSender<Event>, message: TextMessage) {
+    // The only send failure is a dropped receiver, i.e. the embedder is shutting down.
+    if events.send(Event::TextMessage(message)).is_err() {
+        tracing::warn!("Dropping reflected message event: the event receiver is gone");
+    }
+}
+
+/// Decrypts and decodes a `Reflected.envelope`, emitting an [`Event`] if (and only if) it's a
+/// plain-text message. Returns `Ok(())` for anything else (contact/group sync, non-text
+/// messages, ...) -- those are silently out of scope, not errors.
 pub fn handle_reflected_envelope(
     device_group_key: &DeviceGroupKey,
     envelope: &[u8],
     contacts: &ContactStore,
+    events: &mpsc::UnboundedSender<Event>,
 ) -> anyhow::Result<()> {
     let plaintext = device_group_key
         .decrypt_reflected_envelope(envelope)
@@ -71,19 +81,39 @@ pub fn handle_reflected_envelope(
     match envelope.content {
         Some(Content::OutgoingMessage(message)) if is_text_type(message.r#type) => {
             let text = String::from_utf8(message.body).context("Outgoing message body is not valid UTF-8")?;
-            let (to, identifier) = conversation_label(contacts, message.conversation);
-            match identifier {
-                Some(identifier) => println!("[{}] me (to {to} [{identifier}]): {text}", message.created_at),
-                None => println!("[{}] me (to {to}): {text}", message.created_at),
-            }
+            emit(events, TextMessage {
+                timestamp_ms: message.created_at,
+                outgoing: true,
+                conversation: conversation(contacts, message.conversation),
+                sender_identity: None,
+                sender_name: None,
+                text,
+            });
         },
         Some(Content::IncomingMessage(message)) if is_text_type(message.r#type) => {
             let text = String::from_utf8(message.body).context("Incoming message body is not valid UTF-8")?;
-            let author = match message.sender_identity.parse::<ThreemaId>() {
-                Ok(identity) => crate::conversation::display_name(contacts, identity),
-                Err(_) => message.sender_identity.clone(),
+            let sender_name = message
+                .sender_identity
+                .parse::<ThreemaId>()
+                .ok()
+                .and_then(|identity| contact_name(contacts, identity));
+            // A reflected incoming message carries no conversation; only for a one-to-one text is
+            // it implied by the sender (a group text's group identity sits in the undecoded body).
+            let conversation = match CspE2eMessageType::try_from(message.r#type) {
+                Ok(CspE2eMessageType::Text) => Conversation::Contact {
+                    identity: message.sender_identity.clone(),
+                    name: sender_name.clone(),
+                },
+                _ => Conversation::Unknown,
             };
-            println!("[{}] {author} [{}]: {text}", message.created_at, message.sender_identity);
+            emit(events, TextMessage {
+                timestamp_ms: message.created_at,
+                outgoing: false,
+                conversation,
+                sender_identity: Some(message.sender_identity),
+                sender_name,
+                text,
+            });
         },
         _ => {
             // Non-text message, or a sync content type we don't handle (contact/group/settings
@@ -153,10 +183,11 @@ mod tests {
 
         // Wrong key must not decrypt.
         let wrong_key = DeviceGroupKey::from([9_u8; 32]);
+        let (events_tx, mut events_rx) = mpsc::unbounded_channel();
         assert!(wrong_key.decrypt_reflected_envelope(&encrypted).is_err());
 
         // Right key, decrypted via the real (libthreema) implementation, must decrypt -- and the
-        // whole pipeline should run without error.
+        // whole pipeline should emit the message as an event.
         let device_group_key = DeviceGroupKey::from(device_group_key_bytes);
         let contacts_path = std::env::temp_dir().join(format!(
             "threema-cli-test-d2d-contacts-{}-{}.json",
@@ -168,8 +199,16 @@ mod tests {
         ));
         let contacts = ContactStore::load(contacts_path.clone(), "USERUSER".parse().expect("valid identity"))
             .expect("load empty contact store");
-        handle_reflected_envelope(&device_group_key, &encrypted, &contacts)
+        handle_reflected_envelope(&device_group_key, &encrypted, &contacts, &events_tx)
             .expect("decrypting and decoding a well-formed envelope should succeed");
         let _ = std::fs::remove_file(&contacts_path);
+
+        let Event::TextMessage(message) = events_rx.try_recv().expect("an event should have been emitted");
+        assert!(message.outgoing);
+        assert_eq!(message.timestamp_ms, 1_700_000_000_000);
+        assert_eq!(message.text, "hello from the phone");
+        assert!(
+            matches!(message.conversation, Conversation::Contact { ref identity, .. } if identity == "ECHOECHO")
+        );
     }
 }

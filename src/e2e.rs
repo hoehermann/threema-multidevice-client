@@ -33,6 +33,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     csp::{IncomingPayloadForCspE2e, OutgoingPayloadForCspE2e, PayloadQueuesForCspE2e},
+    event::Event,
     store::ContactStore,
 };
 
@@ -47,9 +48,14 @@ pub struct CspE2eProtocolRunner {
     /// Needed to decrypt `Reflected` envelopes -- see `crate::d2d`.
     device_group_key: DeviceGroupKey,
     contacts: ContactStore,
+    events: mpsc::UnboundedSender<Event>,
 }
 
 impl CspE2eProtocolRunner {
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "plain construction from run()'s wiring; to be grouped when the command channel lands"
+    )]
     pub fn new(
         http_client: reqwest::Client,
         context: CspE2eProtocolContextInit,
@@ -58,6 +64,7 @@ impl CspE2eProtocolRunner {
         csp_outgoing: mpsc::Sender<OutgoingPayloadForCspE2e>,
         device_group_key: DeviceGroupKey,
         contacts: ContactStore,
+        events: mpsc::UnboundedSender<Event>,
     ) -> Self {
         Self {
             protocol: CspE2eProtocol::new(context),
@@ -67,6 +74,7 @@ impl CspE2eProtocolRunner {
             csp_outgoing,
             device_group_key,
             contacts,
+            events,
         }
     }
 
@@ -195,7 +203,7 @@ impl CspE2eProtocolRunner {
                 // this). A decode failure shouldn't be fatal -- still ack it below regardless, so
                 // the mediator's reflection queue keeps moving.
                 if let Err(error) =
-                    crate::d2d::handle_reflected_envelope(&self.device_group_key, &reflected.envelope, &self.contacts)
+                    crate::d2d::handle_reflected_envelope(&self.device_group_key, &reflected.envelope, &self.contacts, &self.events)
                 {
                     error!(reflect_id = reflected.reflect_id, ?error, "Failed to handle reflected D2D envelope");
                 }

@@ -2,8 +2,8 @@
 //!
 //! Links as an additional device in an existing multi-device group (the required secrets can be
 //! extracted from an existing linked Threema Desktop installation, see [`Config`]) and processes
-//! incoming plain-text messages. [`run`] drives the whole client; it currently prints messages to
-//! stdout (moving output behind an event channel is the next step of the library conversion).
+//! incoming plain-text messages. [`run`] drives the whole client and reports everything through
+//! the [`Event`] channel handed to it.
 use core::cell::RefCell;
 use std::{path::PathBuf, sync::Arc};
 
@@ -22,9 +22,12 @@ mod csp;
 mod d2d;
 mod d2m;
 mod e2e;
+mod event;
 mod store;
 
-use conversation::PrintingConversationProvider;
+pub use event::{Conversation, Event, TextMessage};
+
+use conversation::EventConversationProvider;
 use csp::{CspProtocolRunner, PayloadQueuesForCspE2e};
 use d2m::D2mProtocolRunner;
 use e2e::CspE2eProtocolRunner;
@@ -49,12 +52,13 @@ impl SettingsProvider for AllowAllSettingsProvider {
 }
 
 /// Connects to the chat and mediator servers and processes messages until one of the connections
-/// ends or fails. Does not reconnect and does not handle signals -- lifecycle policy is the
-/// caller's.
+/// ends or fails, reporting through `events` along the way. Does not reconnect and does not
+/// handle signals -- lifecycle policy is the caller's.
 ///
 /// The internals are `!Send` (single-task by design), so the returned future must be driven on a
 /// current-thread runtime or `LocalSet`, not `tokio::spawn`ed onto a multi-threaded runtime.
-pub async fn run(config: Config) -> anyhow::Result<()> {
+/// [`Event`]s are plain data, so the receiving end may live on any thread.
+pub async fn run(config: Config, events: mpsc::UnboundedSender<Event>) -> anyhow::Result<()> {
     let http_client = https_client_builder().build()?;
     let identity = FullIdentityConfig::from_options(&http_client, config.identity).await?;
 
@@ -90,7 +94,10 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         shortcut: Box::new(DefaultShortcutProvider),
         settings: Box::new(RefCell::new(AllowAllSettingsProvider)),
         contacts: Box::new(RefCell::new(contacts.clone())),
-        conversations: Box::new(RefCell::new(PrintingConversationProvider::new(contacts.clone()))),
+        conversations: Box::new(RefCell::new(EventConversationProvider::new(
+            contacts.clone(),
+            events.clone(),
+        ))),
     };
 
     // Channels between the CSP connection and the E2E driver.
@@ -127,6 +134,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         csp_e2e_outgoing_tx.clone(),
         device_group_key,
         contacts,
+        events,
     );
 
     // None of these runners are `Send` (the in-memory providers use `Rc`), so they must run
