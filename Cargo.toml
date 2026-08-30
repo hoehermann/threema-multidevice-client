@@ -9,7 +9,7 @@ name = "threema-cli"
 path = "src/main.rs"
 
 [dependencies]
-libthreema = { path = "../threema-desktop/packages/libthreema-wasm/libs/libthreema/lib", features = [
+libthreema = { git = "https://github.com/hoehermann/threema-desktop", branch = "threema-multidevice-client", features = [
     "cli",
 ] }
 anyhow = "1"
@@ -52,4 +52,4 @@ crypto_secretbox = { version = "0.1", default-features = false, features = [
 # parameters); this mirrors the `[patch.crates-io]` entry from its own workspace root, which
 # doesn't apply here since threema-cli isn't a member of that workspace.
 [patch.crates-io]
-blake2 = { path = "../threema-desktop/packages/libthreema-wasm/libs/libthreema/patches/blake2" }
+blake2 = { git = "https://github.com/hoehermann/threema-desktop", branch = "threema-multidevice-client" }

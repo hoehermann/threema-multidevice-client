@@ -12,7 +12,15 @@ Consequently, this client is supposed to be linked against a primary device runn
 
 Currently, reflected messages can be received. A CLI example exists for demonstration purposes.
 
-A [patched version of libthreema](https://github.com/hoehermann/threema-desktop/tree/threema-multidevice-client/packages/libthreema-wasm/libs/libthreema) is used since the official version does not expose all functions in the way an external crate needs them.
+A [patched version of libthreema](https://github.com/hoehermann/threema-desktop/tree/threema-multidevice-client/packages/libthreema-wasm/libs/libthreema) is used since the official version does not expose all functions in the way an external crate needs them. By default it is fetched from that branch on GitHub. For local development against an unpushed checkout, clone `threema-desktop` as a sibling directory and add a `.cargo/config.toml` (gitignored) with:
+
+```toml
+[patch."https://github.com/hoehermann/threema-desktop"]
+libthreema = { path = "../threema-desktop/packages/libthreema-wasm/libs/libthreema/lib" }
+
+[patch.crates-io]
+blake2 = { path = "../threema-desktop/packages/libthreema-wasm/libs/libthreema/patches/blake2" }
+```
 
 ## Obtaining Secrets
 
