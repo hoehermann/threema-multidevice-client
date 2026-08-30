@@ -28,6 +28,9 @@ mod store;
 
 pub use command::{Command, Recipient};
 pub use event::{Conversation, Event, TextMessage};
+// Handy for embedders (the CLI, an FFI shim) that want log output without owning a tracing
+// subscriber of their own.
+pub use libthreema::utils::logging::init_stderr_logging;
 
 use conversation::EventConversationProvider;
 use csp::{CspProtocolRunner, PayloadQueuesForCspE2e};
@@ -133,6 +136,11 @@ pub async fn run(
 
     tracing::info!("Connecting to mediator server");
     let d2m_runner = D2mProtocolRunner::new(d2m_context).await?;
+
+    // Both runners complete their handshakes inside `new`, so the connections are up now.
+    if events.send(Event::Connected).is_err() {
+        tracing::warn!("Dropping Connected event: the event receiver is gone");
+    }
 
     let e2e_runner = CspE2eProtocolRunner::new(
         http_client,

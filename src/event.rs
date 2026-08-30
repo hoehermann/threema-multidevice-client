@@ -45,6 +45,9 @@ pub struct TextMessage {
 /// Everything the client reports to its embedder.
 #[derive(Debug, Clone)]
 pub enum Event {
+    /// Both server connections (chat and mediator) completed their handshakes; messages can flow
+    /// from here on.
+    Connected,
     /// A plain-text message arrived, either directly via the chat server or reflected from a
     /// sibling device via the mediator.
     TextMessage(TextMessage),

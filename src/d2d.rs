@@ -203,7 +203,10 @@ mod tests {
             .expect("decrypting and decoding a well-formed envelope should succeed");
         let _ = std::fs::remove_file(&contacts_path);
 
-        let Event::TextMessage(message) = events_rx.try_recv().expect("an event should have been emitted");
+        let Event::TextMessage(message) = events_rx.try_recv().expect("an event should have been emitted")
+        else {
+            panic!("the emitted event should be a text message");
+        };
         assert!(message.outgoing);
         assert_eq!(message.timestamp_ms, 1_700_000_000_000);
         assert_eq!(message.text, "hello from the phone");

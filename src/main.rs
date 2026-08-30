@@ -3,11 +3,11 @@
 use std::path::PathBuf;
 
 use clap::Parser;
-use libthreema::{cli::FullIdentityConfigOptions, utils::logging::init_stderr_logging};
+use libthreema::cli::FullIdentityConfigOptions;
 use tokio::sync::mpsc;
 use tracing::Level;
 
-use threema_multidevice_client::{Command, Conversation, Event, TextMessage};
+use threema_multidevice_client::{Command, Conversation, Event, TextMessage, init_stderr_logging};
 
 #[derive(Parser)]
 #[command(about = "Prints incoming Threema plain-text messages to stdout")]
@@ -78,6 +78,8 @@ async fn main() -> anyhow::Result<()> {
     let printer = async move {
         while let Some(event) = event_rx.recv().await {
             match event {
+                // Connection state goes to the log, keeping stdout message-only.
+                Event::Connected => tracing::info!("Connected"),
                 Event::TextMessage(message) => print_text_message(&message),
             }
         }
