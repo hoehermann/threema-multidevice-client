@@ -41,6 +41,9 @@ pub struct CspE2eProtocolRunner {
     http_client: reqwest::Client,
     d2m_outgoing: mpsc::Sender<D2mOutgoingPayload>,
     d2m_incoming: mpsc::Receiver<D2mIncomingPayload>,
+    /// For CSP payloads triggered by D2M events (leader promotion), where the per-call `queues`
+    /// of `run` aren't in reach.
+    csp_outgoing: mpsc::Sender<OutgoingPayloadForCspE2e>,
     /// Needed to decrypt `Reflected` envelopes -- see `crate::d2d`.
     device_group_key: DeviceGroupKey,
     contacts: ContactStore,
@@ -52,6 +55,7 @@ impl CspE2eProtocolRunner {
         context: CspE2eProtocolContextInit,
         d2m_outgoing: mpsc::Sender<D2mOutgoingPayload>,
         d2m_incoming: mpsc::Receiver<D2mIncomingPayload>,
+        csp_outgoing: mpsc::Sender<OutgoingPayloadForCspE2e>,
         device_group_key: DeviceGroupKey,
         contacts: ContactStore,
     ) -> Self {
@@ -60,6 +64,7 @@ impl CspE2eProtocolRunner {
             http_client,
             d2m_outgoing,
             d2m_incoming,
+            csp_outgoing,
             device_group_key,
             contacts,
         }
@@ -172,6 +177,16 @@ impl CspE2eProtocolRunner {
             D2mIncomingPayload::RolePromotedToLeader => {
                 info!("Promoted to D2M leader role");
                 self.protocol.update_d2m_state(D2mRole::Leader)?;
+                // The chat server withholds incoming messages from every multi-device-capable
+                // connection (one that announced a `csp-device-id`) until it sends
+                // `unblock-incoming-messages`, which only the D2M leader may do. Skipping this
+                // stalls the whole identity's incoming queue: sibling devices are non-leaders
+                // (blocked by the server) and would never receive contact replies or delivery
+                // receipts until this client disconnects and leadership moves on. Duplicate
+                // sends after a D2M reconnect are harmless.
+                self.csp_outgoing
+                    .send(OutgoingPayloadForCspE2e::UnblockIncomingMessages)
+                    .await?;
             },
             D2mIncomingPayload::Reflected(reflected) => {
                 // Messages sent/received while a sibling device (e.g. the phone) held the D2M

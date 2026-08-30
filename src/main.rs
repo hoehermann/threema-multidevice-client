@@ -129,6 +129,7 @@ async fn main() -> anyhow::Result<()> {
         csp_e2e_context,
         d2m_outgoing_tx,
         d2m_incoming_rx,
+        csp_e2e_outgoing_tx.clone(),
         device_group_key,
         contacts,
     );
