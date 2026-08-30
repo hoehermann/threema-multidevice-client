@@ -41,6 +41,10 @@ struct Args {
     /// Directory holding this client's persistent state (`contacts.json`, `nonces.json`).
     #[arg(long, default_value = ".")]
     state_dir: PathBuf,
+
+    /// Logger verbosity (error, warn, info, debug, trace).
+    #[arg(long, default_value = "warn")]
+    log_level: Level,
 }
 
 /// Never blocks unknown identities: there's no UI here to review/accept them anyway.
@@ -53,10 +57,10 @@ impl SettingsProvider for AllowAllSettingsProvider {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
-    init_stderr_logging(Level::INFO);
+    let arguments = Args::parse();
+    init_stderr_logging(arguments.log_level);
 
     let http_client = https_client_builder().build()?;
-    let arguments = Args::parse();
     let config = FullIdentityConfig::from_options(&http_client, arguments.config).await?;
 
     // Validated up front (rather than only via `d2m_context()` below) so the raw device group
