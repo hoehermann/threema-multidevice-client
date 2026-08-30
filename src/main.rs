@@ -7,7 +7,7 @@ use libthreema::{cli::FullIdentityConfigOptions, utils::logging::init_stderr_log
 use tokio::sync::mpsc;
 use tracing::Level;
 
-use threema_cli::{Conversation, Event, TextMessage};
+use threema_cli::{Command, Conversation, Event, TextMessage};
 
 #[derive(Parser)]
 #[command(about = "Prints incoming Threema plain-text messages to stdout")]
@@ -83,12 +83,19 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    tokio::select! {
-        result = threema_cli::run(config, event_tx) => result?,
-        () = printer => {},
-        _ = tokio::signal::ctrl_c() => {
+    // Ctrl-C requests a shutdown through the command channel rather than cancelling run() -- this
+    // is the same path an embedder uses.
+    let (command_tx, command_rx) = mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
             tracing::info!("Received Ctrl-C, shutting down");
-        },
+            let _ = command_tx.send(Command::Shutdown);
+        }
+    });
+
+    tokio::select! {
+        result = threema_cli::run(config, event_tx, command_rx) => result?,
+        () = printer => {},
     }
 
     Ok(())

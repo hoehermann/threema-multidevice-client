@@ -17,6 +17,7 @@ use libthreema::{
 };
 use tokio::sync::mpsc;
 
+mod command;
 mod conversation;
 mod csp;
 mod d2d;
@@ -25,6 +26,7 @@ mod e2e;
 mod event;
 mod store;
 
+pub use command::{Command, Recipient};
 pub use event::{Conversation, Event, TextMessage};
 
 use conversation::EventConversationProvider;
@@ -52,13 +54,19 @@ impl SettingsProvider for AllowAllSettingsProvider {
 }
 
 /// Connects to the chat and mediator servers and processes messages until one of the connections
-/// ends or fails, reporting through `events` along the way. Does not reconnect and does not
-/// handle signals -- lifecycle policy is the caller's.
+/// ends or fails, [`Command::Shutdown`] arrives (or the command sender is dropped), reporting
+/// through `events` along the way. Does not reconnect and does not handle signals -- lifecycle
+/// policy is the caller's.
 ///
 /// The internals are `!Send` (single-task by design), so the returned future must be driven on a
 /// current-thread runtime or `LocalSet`, not `tokio::spawn`ed onto a multi-threaded runtime.
-/// [`Event`]s are plain data, so the receiving end may live on any thread.
-pub async fn run(config: Config, events: mpsc::UnboundedSender<Event>) -> anyhow::Result<()> {
+/// [`Event`]s and [`Command`]s are plain data, so the other ends of both channels may live on any
+/// thread.
+pub async fn run(
+    config: Config,
+    events: mpsc::UnboundedSender<Event>,
+    mut commands: mpsc::UnboundedReceiver<Command>,
+) -> anyhow::Result<()> {
     let http_client = https_client_builder().build()?;
     let identity = FullIdentityConfig::from_options(&http_client, config.identity).await?;
 
@@ -151,6 +159,19 @@ pub async fn run(config: Config, events: mpsc::UnboundedSender<Event>) -> anyhow
             outgoing: csp_e2e_outgoing_tx,
         }) => {
             result.context("Message processing ended")?;
+        },
+        () = async {
+            loop {
+                match commands.recv().await {
+                    // A dropped sender is an implicit shutdown request.
+                    Some(Command::Shutdown) | None => break,
+                    Some(Command::SendText { to, text }) => {
+                        tracing::error!(?to, ?text, "Sending is not implemented yet");
+                    },
+                }
+            }
+        } => {
+            tracing::info!("Shutting down on command");
         },
     }
 
