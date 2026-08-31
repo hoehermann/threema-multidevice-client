@@ -10,7 +10,9 @@ Consequently, this client is supposed to be linked against a primary device runn
 
 ## State
 
-Currently, reflected messages can be received. A CLI example exists for demonstration purposes.
+Currently, plain-text messages in one-to-one conversations can be received and sent. A CLI example exists for demonstration purposes; it also reads `IDENTITY message text` lines from stdin to send.
+
+Received messages arrive either directly via the chat server or reflected from another linked device. Sending reflects the message to the other devices, hands it to the chat server and marks it as sent once acknowledged. Recipients that are not known yet are looked up at the directory server and then synced to the other devices. Group conversations are not implemented.
 
 A [patched version of libthreema](https://github.com/hoehermann/threema-desktop/tree/threema-multidevice-client/packages/libthreema-wasm/libs/libthreema) is used since the official version does not expose all functions in the way an external crate needs them. By default it is fetched from that branch on GitHub. For local development against an unpushed checkout, clone `threema-desktop` as a sibling directory and add a `.cargo/config.toml` (gitignored) with:
 
