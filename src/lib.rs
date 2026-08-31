@@ -10,7 +10,7 @@ use std::{path::PathBuf, sync::Arc};
 use anyhow::Context as _;
 use libthreema::{
     cli::{FullIdentityConfig, FullIdentityConfigOptions},
-    common::{ClientInfo, keys::DeviceGroupKey},
+    common::{ClientInfo, keys::{ClientKey, DeviceGroupKey}},
     csp_e2e::CspE2eProtocolContextInit,
     https::cli::https_client_builder,
     model::provider::{ProviderError, SettingsProvider, in_memory::DefaultShortcutProvider},
@@ -38,7 +38,7 @@ pub use libthreema;
 use conversation::EventConversationProvider;
 use csp::{CspProtocolRunner, PayloadQueuesForCspE2e};
 use d2m::D2mProtocolRunner;
-use e2e::CspE2eProtocolRunner;
+use e2e::{CspE2eProtocolRunner, CspE2eRunnerDeps};
 use store::{ContactStore, NonceScope, NonceStore};
 
 /// Everything needed to run the client.
@@ -71,7 +71,7 @@ impl SettingsProvider for AllowAllSettingsProvider {
 pub async fn run(
     config: Config,
     events: mpsc::UnboundedSender<Event>,
-    mut commands: mpsc::UnboundedReceiver<Command>,
+    commands: mpsc::UnboundedReceiver<Command>,
 ) -> anyhow::Result<()> {
     let http_client = https_client_builder().build()?;
     let identity = FullIdentityConfig::from_options(&http_client, config.identity).await?;
@@ -145,19 +145,26 @@ pub async fn run(
         tracing::warn!("Dropping Connected event: the event receiver is gone");
     }
 
-    let e2e_runner = CspE2eProtocolRunner::new(
+    let e2e_runner = CspE2eProtocolRunner::new(CspE2eRunnerDeps {
         http_client,
-        csp_e2e_context,
-        d2m_outgoing_tx,
-        d2m_incoming_rx,
-        csp_e2e_outgoing_tx.clone(),
+        context: csp_e2e_context,
+        d2m_outgoing: d2m_outgoing_tx,
+        d2m_incoming: d2m_incoming_rx,
+        csp_outgoing: csp_e2e_outgoing_tx.clone(),
         device_group_key,
         contacts,
         events,
-    );
+        commands,
+        user_identity: identity.minimal.user_identity,
+        client_key: ClientKey::from(&identity.minimal.client_key),
+        device_id: d2x_config.d2x_device_id.0,
+        csp_nonces: nonces.scoped(NonceScope::CspE2e),
+        d2x_nonces: nonces.scoped(NonceScope::D2x),
+    });
 
     // None of these runners are `Send` (the in-memory providers use `Rc`), so they must run
-    // concurrently within a single task via `select!` rather than via `tokio::spawn`.
+    // concurrently within a single task via `select!` rather than via `tokio::spawn`. The E2E
+    // runner also owns the command channel; it returns `Ok` on shutdown, ending the `select!`.
     tokio::select! {
         result = csp_runner.run(client_hello, csp_e2e_incoming_tx, csp_e2e_outgoing_rx) => {
             result.context("CSP connection ended")?;
@@ -170,19 +177,6 @@ pub async fn run(
             outgoing: csp_e2e_outgoing_tx,
         }) => {
             result.context("Message processing ended")?;
-        },
-        () = async {
-            loop {
-                match commands.recv().await {
-                    // A dropped sender is an implicit shutdown request.
-                    Some(Command::Shutdown) | None => break,
-                    Some(Command::SendText { to, text }) => {
-                        tracing::error!(?to, ?text, "Sending is not implemented yet");
-                    },
-                }
-            }
-        } => {
-            tracing::info!("Shutting down on command");
         },
     }
 

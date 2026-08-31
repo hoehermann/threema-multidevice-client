@@ -19,8 +19,9 @@ pub enum Recipient {
 /// Everything the embedder can ask the client to do.
 #[derive(Debug, Clone)]
 pub enum Command {
-    /// Send a plain-text message. Not implemented yet -- currently only logged, so the command
-    /// topology is settled before the send flow exists.
+    /// Send a plain-text message. Only [`Recipient::Contact`]s already known to the contact store
+    /// are supported for now; anything else is reported back via
+    /// [`crate::Event::SendFailed`].
     SendText { to: Recipient, text: String },
     /// Terminate the client: [`crate::run`] returns cleanly. Dropping the command sender has the
     /// same effect.

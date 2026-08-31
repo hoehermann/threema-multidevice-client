@@ -81,6 +81,9 @@ async fn main() -> anyhow::Result<()> {
                 // Connection state goes to the log, keeping stdout message-only.
                 Event::Connected => tracing::info!("Connected"),
                 Event::TextMessage(message) => print_text_message(&message),
+                Event::SendFailed { conversation, reason } => {
+                    eprintln!("send failed ({conversation:?}): {reason}");
+                },
             }
         }
     };
@@ -88,10 +91,30 @@ async fn main() -> anyhow::Result<()> {
     // Ctrl-C requests a shutdown through the command channel rather than cancelling run() -- this
     // is the same path an embedder uses.
     let (command_tx, command_rx) = mpsc::unbounded_channel();
+    let ctrl_c_command_tx = command_tx.clone();
     tokio::spawn(async move {
         if tokio::signal::ctrl_c().await.is_ok() {
             tracing::info!("Received Ctrl-C, shutting down");
-            let _ = command_tx.send(Command::Shutdown);
+            let _ = ctrl_c_command_tx.send(Command::Shutdown);
+        }
+    });
+
+    // `IDENTITY message text` lines on stdin become send commands, so sending can be exercised
+    // without an embedder.
+    tokio::spawn(async move {
+        use tokio::io::AsyncBufReadExt as _;
+        let mut lines = tokio::io::BufReader::new(tokio::io::stdin()).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let Some((identity, text)) = line.split_once(char::is_whitespace) else {
+                eprintln!("usage: IDENTITY message text");
+                continue;
+            };
+            let _ = command_tx.send(Command::SendText {
+                to: threema_multidevice_client::Recipient::Contact {
+                    identity: identity.to_owned(),
+                },
+                text: text.to_owned(),
+            });
         }
     });
 

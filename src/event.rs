@@ -51,4 +51,12 @@ pub enum Event {
     /// A plain-text message arrived, either directly via the chat server or reflected from a
     /// sibling device via the mediator.
     TextMessage(TextMessage),
+    /// A [`crate::Command::SendText`] could not be carried out (unknown recipient, unsupported
+    /// conversation type, ...). Non-fatal: the connection stays up.
+    SendFailed {
+        /// The conversation the message was intended for.
+        conversation: Conversation,
+        /// Human-readable description of what went wrong.
+        reason: String,
+    },
 }

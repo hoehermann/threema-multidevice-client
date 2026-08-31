@@ -23,12 +23,14 @@ pub enum IncomingPayloadForCspE2e {
 
 /// Outgoing payloads accepted from the E2E driver.
 pub enum OutgoingPayloadForCspE2e {
+    Message(MessageWithMetadataBox),
     MessageAck(MessageAck),
     UnblockIncomingMessages,
 }
 impl From<OutgoingPayloadForCspE2e> for OutgoingPayload {
     fn from(payload: OutgoingPayloadForCspE2e) -> Self {
         match payload {
+            OutgoingPayloadForCspE2e::Message(message) => OutgoingPayload::MessageWithMetadataBox(message),
             OutgoingPayloadForCspE2e::MessageAck(message_ack) => OutgoingPayload::MessageAck(message_ack),
             OutgoingPayloadForCspE2e::UnblockIncomingMessages => OutgoingPayload::UnblockIncomingMessages,
         }
