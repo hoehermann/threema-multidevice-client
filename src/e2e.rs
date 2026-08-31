@@ -7,12 +7,17 @@ use std::collections::HashMap;
 
 use anyhow::{Context as _, anyhow, bail};
 use libthreema::{
-    common::{Delta, MessageId, Nonce, ThreemaId, keys::{ClientKey, DeviceGroupKey}},
+    common::{Delta, MessageId, Nonce, ThreemaId, keys::{ClientKey, DeviceGroupKey}, task::TaskLoop},
     csp_e2e::{
         CspE2eProtocol, CspE2eProtocolContextInit, D2mRole, ReflectId,
         contacts::{
-            create::{CreateContactsInstruction, CreateContactsResponse},
-            lookup::ContactsLookupResponse,
+            create::{
+                CreateContactsInstruction, CreateContactsLoop, CreateContactsResponse, CreateContactsTask,
+            },
+            lookup::{
+                CacheLookupPolicy, ContactResult, ContactsLookupInstruction, ContactsLookupResponse,
+                ContactsLookupSubtask,
+            },
             update::{UpdateContactsInstruction, UpdateContactsResponse},
         },
         message::task::{
@@ -33,6 +38,7 @@ use libthreema::{
         OutgoingPayload as D2mOutgoingPayload, Reflect, ReflectFlags as D2mReflectFlags, ReflectedAck,
     },
     model::{
+        contact::{Contact, ContactInit},
         message::{
             ContactMessageBody, MessageOverrides, OutgoingContactMessageBody, OutgoingMessage,
             OutgoingMessageBody, TextMessage as OutgoingTextMessage,
@@ -74,6 +80,17 @@ pub struct CspE2eRunnerDeps {
     pub device_id: u64,
     pub csp_nonces: ScopedNonceStore,
     pub d2x_nonces: ScopedNonceStore,
+}
+
+/// Outcome of resolving a send's recipient.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "one short-lived value per send, destructured immediately; boxing would only add an allocation"
+)]
+enum ResolvedContact {
+    Found(Contact),
+    /// The recipient can't be messaged, with a reason for the user.
+    Rejected(String),
 }
 
 /// An outgoing message that was handed to the chat server but not yet acknowledged by it.
@@ -176,22 +193,8 @@ impl CspE2eProtocolRunner {
 
             match task.poll(self.protocol.context())? {
                 IncomingMessageLoop::Instruction(IncomingMessageInstruction::FetchSender(instruction)) => {
-                    let work_directory_request_future = async {
-                        match instruction.work_directory_request {
-                            Some(work_directory_request) => {
-                                work_directory_request.send(&self.http_client).await.map(Some)
-                            },
-                            None => Ok(None),
-                        }
-                    };
-                    let (directory_result, work_directory_result) = tokio::join!(
-                        instruction.directory_request.send(&self.http_client),
-                        work_directory_request_future,
-                    );
-                    task.response(IncomingMessageResponse::FetchSender(ContactsLookupResponse {
-                        directory_result,
-                        work_directory_result: work_directory_result.transpose(),
-                    }))?;
+                    let response = self.run_contacts_lookup_requests(instruction).await;
+                    task.response(IncomingMessageResponse::FetchSender(response))?;
                 },
                 IncomingMessageLoop::Instruction(IncomingMessageInstruction::CreateContact(instruction)) => {
                     match instruction {
@@ -287,6 +290,101 @@ impl CspE2eProtocolRunner {
         Ok(())
     }
 
+    /// Runs the HTTPS requests a contact lookup asked for. Shared by the incoming-message path
+    /// (libthreema looking up an unknown sender) and by our own lookups for outgoing messages.
+    async fn run_contacts_lookup_requests(
+        &self,
+        instruction: ContactsLookupInstruction,
+    ) -> ContactsLookupResponse {
+        let work_directory_request_future = async {
+            match instruction.work_directory_request {
+                Some(work_directory_request) => work_directory_request.send(&self.http_client).await.map(Some),
+                None => Ok(None),
+            }
+        };
+        let (directory_result, work_directory_result) = tokio::join!(
+            instruction.directory_request.send(&self.http_client),
+            work_directory_request_future,
+        );
+        ContactsLookupResponse {
+            directory_result,
+            work_directory_result: work_directory_result.transpose(),
+        }
+    }
+
+    /// Looks an identity up at the directory server, returning what the directory knows about it.
+    async fn lookup_contact(&mut self, identity: ThreemaId) -> anyhow::Result<Option<ContactResult>> {
+        let mut lookup = ContactsLookupSubtask::new(vec![identity], CacheLookupPolicy::Allow);
+        loop {
+            match lookup.poll(self.protocol.context())? {
+                TaskLoop::Instruction(instruction) => {
+                    let response = self.run_contacts_lookup_requests(instruction).await;
+                    lookup.response(response)?;
+                },
+                TaskLoop::Done(mut contacts) => return Ok(contacts.remove(&identity)),
+            }
+        }
+    }
+
+    /// Stores a freshly looked-up contact and syncs it to the other devices, via the same
+    /// transaction machinery libthreema uses when the receive path meets an unknown sender.
+    async fn create_contact(&mut self, contact: ContactInit) -> anyhow::Result<()> {
+        let mut task = CreateContactsTask::new(vec![contact]);
+        loop {
+            match task.poll(self.protocol.context())? {
+                CreateContactsLoop::Instruction(CreateContactsInstruction::BeginTransaction(instruction)) => {
+                    if let Some(response) = self.begin_transaction(instruction).await? {
+                        task.response(CreateContactsResponse::BeginTransactionResponse(response))?;
+                    }
+                },
+                CreateContactsLoop::Instruction(CreateContactsInstruction::ReflectAndCommitTransaction(
+                    instruction,
+                )) => {
+                    task.response(CreateContactsResponse::CommitTransactionResponse(
+                        self.reflect_and_commit_transaction(instruction).await?,
+                    ))?;
+                },
+                CreateContactsLoop::Done(_) => return Ok(()),
+            }
+        }
+    }
+
+    /// Resolves a recipient the contact store doesn't know yet: look it up at the directory and,
+    /// if it exists, store and sync it.
+    async fn resolve_unknown_contact(&mut self, identity: ThreemaId) -> anyhow::Result<ResolvedContact> {
+        info!(%identity, "Contact is unknown, looking it up at the directory");
+        // A lookup failure (network trouble, directory hiccup) is specific to this send attempt
+        // and must not take the whole connection down.
+        let result = match self.lookup_contact(identity).await {
+            Ok(result) => result,
+            Err(error) => {
+                return Ok(ResolvedContact::Rejected(format!(
+                    "Looking {identity} up failed: {error:#}"
+                )));
+            },
+        };
+
+        match result {
+            Some(ContactResult::ExistingContact(contact)) => Ok(ResolvedContact::Found(contact)),
+            Some(ContactResult::NewContact(contact)) => {
+                // Creating it is what persists the public key and tells the other devices about
+                // the new contact; a failure here is a D2M problem, so it stays fatal.
+                self.create_contact(contact.clone()).await?;
+                info!(%identity, "Stored contact looked up at the directory");
+                Ok(ResolvedContact::Found(contact))
+            },
+            Some(ContactResult::User) => {
+                Ok(ResolvedContact::Rejected("Cannot send a message to yourself".to_owned()))
+            },
+            Some(ContactResult::Invalid(identity)) => Ok(ResolvedContact::Rejected(format!(
+                "{identity} does not exist or has been revoked"
+            ))),
+            None => Ok(ResolvedContact::Rejected(format!(
+                "The directory returned no result for {identity}"
+            ))),
+        }
+    }
+
     /// Report a failed send attempt to the embedder. Never fatal for the connection.
     fn send_failed(&self, conversation: Conversation, reason: impl Into<String>) {
         let reason = reason.into();
@@ -328,14 +426,15 @@ impl CspE2eProtocolRunner {
         };
         let contact = match self.contacts.get(receiver) {
             Ok(Some(contact)) => contact,
-            Ok(None) => {
-                // Contact lookup via the directory server isn't implemented yet; the store only
-                // fills from received messages.
-                self.send_failed(
-                    conversation(None),
-                    format!("{identity} is not a known contact -- message them from another linked device first"),
-                );
-                return Ok(());
+            // Not known yet: ask the directory for its public key. Contacts otherwise only reach
+            // this client via a sibling's contact sync, which never happens for contacts that
+            // already existed when this device was linked.
+            Ok(None) => match self.resolve_unknown_contact(receiver).await? {
+                ResolvedContact::Found(contact) => contact,
+                ResolvedContact::Rejected(reason) => {
+                    self.send_failed(conversation(None), reason);
+                    return Ok(());
+                },
             },
             Err(error) => {
                 self.send_failed(conversation(None), format!("Contact store lookup failed: {error}"));
